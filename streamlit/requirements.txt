@@ -1,0 +1,109 @@
+import streamlit as st
+import torch
+import torch.nn as nn
+import timm
+import numpy as np
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+from PIL import Image
+
+CLASS_NAMES = ["akiec", "bcc", "bkl", "df", "mel", "nv", "vasc"]
+CLASS_LABELS = {
+    "akiec": "Keratose actinique (AKIEC)",
+    "bcc": "Carcinome basocellulaire (BCC)",
+    "bkl": "Keratose benigne (BKL)",
+    "df": "Dermatofibrome (DF)",
+    "mel": "Melanome (MEL)",
+    "nv": "Naevus melanocytaire (NV)",
+    "vasc": "Lesion vasculaire (VASC)",
+}
+SECURITY_LABELS = ["Authentique", "Attaque adversariale"]
+
+transform = A.Compose([
+    A.Resize(224, 224),
+    A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+    ToTensorV2(),
+])
+
+
+class SkinClassifier(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.backbone = timm.create_model(
+            "efficientnet_b0", pretrained=False, num_classes=0
+        )
+
+    def forward(self, x):
+        return self.backbone(x)
+
+
+class DoubleHeadSkinModel(nn.Module):
+    def __init__(self, backbone):
+        super().__init__()
+        self.backbone = backbone
+        in_features = 1280
+        self.medical_head = nn.Linear(in_features, 7)
+        self.security_head = nn.Linear(in_features, 2)
+
+    def forward(self, x):
+        features = self.backbone(x)
+        return self.medical_head(features), self.security_head(features)
+
+
+@st.cache_resource
+def load_model():
+    model = DoubleHeadSkinModel(SkinClassifier().backbone)
+    ckpt = "models/best_double_head_model.pth"
+    state = torch.load(ckpt, map_location="cpu", weights_only=True)
+    model.load_state_dict(state, strict=True)
+    model.eval()
+    return model
+
+
+def preprocess(image: Image.Image):
+    arr = np.array(image.convert("RGB"))
+    out = transform(image=arr)["image"]
+    return out.unsqueeze(0)
+
+
+def main():
+    st.set_page_config(page_title="Dermato-IA", page_icon="🩺", layout="wide")
+    st.title("Dermato-IA — Diagnostic dermatologique securise")
+    st.caption("EfficientNet-B0 a double tete : diagnostic medical + detection adversariale.")
+
+    model = load_model()
+
+    uploaded = st.file_uploader("Importer une image dermatologique", type=["jpg", "jpeg", "png"])
+    if uploaded is None:
+        return
+
+    image = Image.open(uploaded)
+    st.image(image, caption="Image importee", use_container_width=True)
+
+    if st.button("Analyser"):
+        tensor = preprocess(image)
+        with torch.no_grad():
+            med_logits, sec_logits = model(tensor)
+        med_probs = torch.softmax(med_logits, dim=1)[0].numpy()
+        sec_probs = torch.softmax(sec_logits, dim=1)[0].numpy()
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Diagnostic medical")
+            order = np.argsort(med_probs)[::-1][:3]
+            for idx in order:
+                name = CLASS_NAMES[idx]
+                conf = float(med_probs[idx]) * 100
+                st.progress(int(conf), text=f"{CLASS_LABELS[name]} — {conf:.2f}%")
+        with col2:
+            st.subheader("Alerte de securite")
+            attacked = int(np.argmax(sec_probs)) == 1
+            if attacked:
+                st.error(f"Image detectee comme attaque adversariale ({sec_probs[1]*100:.2f}%).")
+            else:
+                st.success(f"Image jugee authentique ({sec_probs[0]*100:.2f}%).")
+
+
+if __name__ == "__main__":
+    main()
+""", filePath: "C:\\Users\\xphones\\Downloads\\nom_master_jmf\\deployment\\streamlit\\app.py")
